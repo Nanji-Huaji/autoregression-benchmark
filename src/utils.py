@@ -99,3 +99,27 @@ def load_prompts_from_jsonl(file_path: str, max_prompts: Optional[int] = None) -
             except json.JSONDecodeError:
                 print(f"警告: 无法解析第 {i+1} 行的JSON，已跳过。")
     return prompts
+
+
+def split_list_into_chunks(lst: List[str], m: int) -> List[List[str]]:
+    """
+    将列表分成m份，如果不够，最后一份可以少一些。
+
+    Args:
+        lst: 要分割的列表
+        m: 要分成的份数
+
+    Returns:
+        包含m个子列表的列表，每个子列表包含原列表的一部分元素
+    """
+    n = len(lst)
+    chunk_size = n // m
+    remainder = n % m
+    chunks = []
+    start = 0
+    for i in range(m):
+        end = start + chunk_size + (1 if i < remainder else 0)
+        if start < n:
+            chunks.append(lst[start:end])
+        start = end
+    return chunks

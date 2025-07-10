@@ -111,70 +111,80 @@ class BenchmarkModel:
                 "prefill_throughput_prompts_per_sec": 0.0,
             }
 
-        prefill_latencies = []
-        decode_latencies = []
         generated_tokens_counts = []
 
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
 
-        eos_token_id = self.tokenizer.eos_token_id
+        # tokenization
+        self.tokenizer.padding_side = "left"
+        inputs = self.tokenizer(prompts, return_tensors="pt", padding=True).to(self.device)
+        input_ids = inputs.input_ids
+        attention_mask = inputs.attention_mask
+        batch_size = input_ids.shape[0]
 
-        for prompt in tqdm(prompts, desc="Benchmarking"):
-            inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
-            input_ids = inputs.input_ids
+        # prefill
+        torch.cuda.synchronize()
+        start_event.record(torch.cuda.current_stream())
+        outputs = self.target_model(input_ids=input_ids, attention_mask=attention_mask, use_cache=True)
+        end_event.record(torch.cuda.current_stream())
+        torch.cuda.synchronize()
+        prefill_latency = start_event.elapsed_time(end_event) / 1000.0
 
-            # Prefill phase
-            torch.cuda.synchronize()
-            start_event.record(torch.cuda.current_stream())
+        # decode
+        past_key_values = outputs.past_key_values
+        # 获取批次中每个序列的最后一个真实token作为解码的开始
+        last_token_indices = attention_mask.sum(dim=1) - 1
+        next_token = torch.argmax(outputs.logits[torch.arange(batch_size), last_token_indices, :], dim=-1).unsqueeze(-1)
 
-            outputs = self.target_model(input_ids=input_ids, use_cache=True)
-            end_event.record(torch.cuda.current_stream())
-            torch.cuda.synchronize()
-            prefill_latency = start_event.elapsed_time(end_event) / 1000.0  # Convert to seconds
-            prefill_latencies.append(prefill_latency)
+        # 记录每个序列生成的token
+        generated_tokens = [[] for _ in range(batch_size)]
+        # 追踪哪些序列已经完成
+        is_finished = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
 
-            # Decoding phase
+        torch.cuda.synchronize()
+        start_event.record(torch.cuda.current_stream())
 
+        for step in range(max_token):
+            outputs = self.target_model(input_ids=next_token, past_key_values=past_key_values, use_cache=True)
             past_key_values = outputs.past_key_values
             next_token = torch.argmax(outputs.logits[:, -1, :], dim=-1).unsqueeze(-1)
-            current_generated_tokens = 0
-
-            torch.cuda.synchronize()
-            start_event.record(torch.cuda.current_stream())
-            for _ in range(max_token):
-                outputs = self.target_model(input_ids=next_token, past_key_values=past_key_values, use_cache=True)
-                past_key_values = outputs.past_key_values
-                next_token = torch.argmax(outputs.logits[:, -1, :], dim=-1).unsqueeze(-1)
-                current_generated_tokens += 1
-                if next_token.item() == eos_token_id:
-                    break
-
-            end_event.record(torch.cuda.current_stream())
-            torch.cuda.synchronize()
-            decode_latency = start_event.elapsed_time(end_event) / 1000.0
-            decode_latencies.append(decode_latency)
-            generated_tokens_counts.append(current_generated_tokens)
+            # 更新已完成的序列
+            # 注意: next_token是新生成的，所以要跟is_finished状态对齐
+            # 只有那些“尚未完成”的序列，才需要检查它新生成的token是不是eos
+            just_finished = ~is_finished & (next_token.squeeze() == self.tokenizer.eos_token_id)
+            is_finished |= just_finished
+            # 记录尚未完成的序列的生成结果
+            for i in range(batch_size):
+                if not is_finished[i]:
+                    generated_tokens[i].append(next_token[i].item())
+            # 如果所有序列都已完成，提前退出循环
+            if is_finished.all():
+                break
+        end_event.record(torch.cuda.current_stream())
+        torch.cuda.synchronize()
+        decode_latency = start_event.elapsed_time(end_event) / 1000.0
 
         # metrics
-        total_prompts = len(prompts)
+        total_prompts = batch_size
+        generated_tokens_counts = [len(tokens) for tokens in generated_tokens]
         total_generated_tokens = sum(generated_tokens_counts)
-        total_prefill_time = sum(prefill_latencies)
-        total_decode_time = sum(decode_latencies)
+        prefill_throughput = total_prompts / prefill_latency if prefill_latency > 0 else 0.0
+        decode_throughput = total_generated_tokens / decode_latency if decode_latency > 0 else 0.0
 
-        # Prefill 吞吐量 (prompts/sec)
-        prefill_throughput = total_prompts / total_prefill_time if total_prefill_time > 0 else 0.0
-        # Decode 吞吐量 (tokens/sec)
-        decode_throughput = total_generated_tokens / total_decode_time if total_decode_time > 0 else 0.0
+        prefill_throughput = total_prompts / prefill_latency if prefill_latency > 0 else 0.0
+        decode_throughput = total_generated_tokens / decode_latency if decode_latency > 0 else 0.0
 
         results: BenchmarkResults = {
             "num_prompts": total_prompts,
             "total_generated_tokens": total_generated_tokens,
-            "total_prefill_time_sec": total_prefill_time,
-            "total_decode_time_sec": total_decode_time,
+            "total_prefill_time_sec": prefill_latency,
+            "total_decode_time_sec": decode_latency,
             "decode_throughput_tokens_per_sec": decode_throughput,
             "prefill_throughput_prompts_per_sec": prefill_throughput,
         }
+
+        self.logger.info(f"One batch benchmark completed: {results}")
         return results
 
     @torch.inference_mode()

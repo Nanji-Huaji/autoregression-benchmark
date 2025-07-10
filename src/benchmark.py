@@ -1,11 +1,13 @@
 import argparse
-from utils import setup_logger, load_prompts_from_jsonl
+from utils import setup_logger, load_prompts_from_jsonl, split_list_into_chunks
 from model import BenchmarkModel
 
 from datetime import datetime
 
 import json
 import os
+
+from tqdm import tqdm
 
 
 def parse_args():
@@ -63,7 +65,28 @@ def run_benchmark(args):
     model_instance.warmup(warmup_prompts, max_token)
 
     # run benchmark
-    results = model_instance.autoregressive_decoding(prompts, max_token)
+    batch_list = split_list_into_chunks(prompts, 4)
+    results = []
+    for batch in tqdm(batch_list, desc="Running benchmark batches"):
+        batch_results = model_instance.autoregressive_decoding(batch, max_token)
+        results.append(batch_results)
+
+    # # Aggregate results
+    total_prompts = sum(result["num_prompts"] for result in results)
+    total_generated_tokens = sum(result["total_generated_tokens"] for result in results)
+    total_prefill_time_sec = sum(result["total_prefill_time_sec"] for result in results)
+    total_decode_time_sec = sum(result["total_decode_time_sec"] for result in results)
+    decode_throughput = total_generated_tokens / total_decode_time_sec if total_decode_time_sec > 0 else 0.0
+    prefill_throughput = total_prompts / total_prefill_time_sec if total_prefill_time_sec > 0 else 0.0
+    results = {
+        "model": model,
+        "num_prompts": total_prompts,
+        "total_generated_tokens": total_generated_tokens,
+        "total_prefill_time_sec": total_prefill_time_sec,
+        "total_decode_time_sec": total_decode_time_sec,
+        "decode_throughput_tokens_per_sec": decode_throughput,
+        "prefill_throughput_prompts_per_sec": prefill_throughput,
+    }
     logger.info(f"Benchmark results: {results}")
 
     # Save results to a file
