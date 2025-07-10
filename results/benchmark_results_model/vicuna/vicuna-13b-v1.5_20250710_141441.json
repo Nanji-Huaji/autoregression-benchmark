@@ -1,0 +1,8 @@
+{
+    "num_prompts": 80,
+    "total_generated_tokens": 8908,
+    "total_prefill_time_sec": 4.500536632537842,
+    "total_decode_time_sec": 397.37000006103517,
+    "decode_throughput_tokens_per_sec": 22.417394364526135,
+    "prefill_throughput_prompts_per_sec": 17.775658000785604
+}
