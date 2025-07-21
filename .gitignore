@@ -211,3 +211,6 @@ __marimo__/
 
 # Model
 model/*
+
+# Results
+results/*

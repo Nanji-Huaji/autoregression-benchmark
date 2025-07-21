@@ -7,6 +7,8 @@ import os
 
 from typing import List, Optional
 
+from transformers.modeling_utils import PreTrainedModel
+
 
 def setup_logger(log_dir: str = "log") -> logging.Logger:
     """
