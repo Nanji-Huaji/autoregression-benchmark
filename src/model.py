@@ -32,6 +32,9 @@ class BenchmarkResults(TypedDict):
     decode_throughput_tokens_per_sec: float
     acceptance_rate: float
     little_model_acceptance_rate: float
+    total_target_model_forward_time: int
+    total_draft_model_forward_time: int
+    total_little_model_forward_time: int
 
 
 class BenchmarkModel:
@@ -135,9 +138,7 @@ class BenchmarkModel:
     def autoregressive_decoding(
         self, prompts: List[str], max_token: int = 128, **kwargs
     ) -> Tuple[BenchmarkResults, List[Dict]]:
-        self.logger.info(
-            f"Starting benchmark for {len(prompts)} prompts, " f"generating up to {max_token} tokens each."
-        )
+        self.logger.info(f"Starting benchmark for {len(prompts)} prompts, generating up to {max_token} tokens each.")
 
         if not prompts:
             raise ValueError("No prompts provided for benchmarking.")
@@ -146,6 +147,7 @@ class BenchmarkModel:
         generated_tokens = 0
         wall_time = 0.0
         acceptance_rate = 1.0
+        total_target_model_forward_time = 0
 
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
@@ -160,6 +162,8 @@ class BenchmarkModel:
                 {"prompt": prompt, "new_generated_text": new_generated_text, "new_tokens_count": new_tokens_count}
             )
             generated_tokens += new_tokens_count
+            # generate 的 forward 次数 = 生成 token 数 + 1（初始 prompt）
+            total_target_model_forward_time += new_tokens_count + 1
         end_event.record(stream=torch.cuda.current_stream())
         torch.cuda.synchronize()  # 确保所有操作完成
         wall_time += start_event.elapsed_time(end_event) / 1000.0  # 将毫秒转换为秒
@@ -173,6 +177,9 @@ class BenchmarkModel:
             decode_throughput_tokens_per_sec=decode_throughput,
             acceptance_rate=acceptance_rate,
             little_model_acceptance_rate=1.0,
+            total_target_model_forward_time=total_target_model_forward_time,
+            total_draft_model_forward_time=0,
+            total_little_model_forward_time=0,
         )
         return res, model_answer
 
@@ -238,87 +245,92 @@ class BenchmarkModel:
         self, prompts: List[str], max_token: int = 128, gamma: int = 4, **kwargs
     ) -> Tuple[BenchmarkResults, List[Dict]]:
         """
-        思辨解码实现。
+        思辨解码实现，并根据指定的 BenchmarkResults 结构统计信息。
         """
-        if not hasattr(self, "draft_model"):
+        if not hasattr(self, "draft_model") or self.draft_model is None:
             raise AttributeError("Draft model `self.draft_model` is required for speculative decoding.")
+
         model_answers = []
         total_generated_tokens = 0
-        total_accepted_tokens = 0
+
+        # [MODIFIED] 初始化统计信息字典，用于计数
+        # 'forward_time' 在此被解释为 'forward_count' (调用次数)
+        total_stats = {
+            "target_forward_count": 0,
+            "draft_forward_count": 0,
+            "total_drafted_tokens": 0,
+            "total_accepted_tokens": 0,
+        }
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
-        if self.draft_model is None:
-            raise ValueError("Draft model is not set. Please add a draft model before using speculative decoding.")
         start_event.record(stream=torch.cuda.current_stream())
         for prompt in tqdm(prompts, desc="Speculative Decoding"):
             # --- 1. 初始化和 Prompt 处理 ---
             inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
-
             if inputs.input_ids.shape[1] == 0:
                 self.logger.warning(f"Skipping an empty or invalid prompt: '{prompt}'")
                 model_answers.append({"prompt": prompt, "generated_text": "", "new_tokens_count": 0})
                 continue
+
             input_ids = inputs.input_ids
             attention_mask = inputs.attention_mask
             prompt_len = input_ids.shape[1]
-
             # --- 预计算 Prompt 的 KV 缓存 ---
             target_outputs = self.target_model(input_ids=input_ids, attention_mask=attention_mask, use_cache=True)
+            total_stats["target_forward_count"] += 1
             past_key_values_target = target_outputs.past_key_values
-
             draft_outputs = self.draft_model(input_ids=input_ids, attention_mask=attention_mask, use_cache=True)
+            total_stats["draft_forward_count"] += 1
             past_key_values_draft = draft_outputs.past_key_values
-
             generated_sequence = input_ids
             n_generated_for_prompt = 0
+
             while n_generated_for_prompt < max_token:
                 # --- 2. 起草阶段 (Drafting) ---
-                # 修改点: 替换 .generate() 为手动循环，以精确控制KV缓存
                 draft_tokens = []
                 draft_logits_list = []
 
-                # 使用当前的 draft_kv_cache 进行多步预测
                 current_draft_kv = past_key_values_draft
                 next_token = generated_sequence[:, -1:]
+
                 for _ in range(gamma):
                     draft_step_outputs = self.draft_model(
                         input_ids=next_token, use_cache=True, past_key_values=current_draft_kv
                     )
-
-                    # 获取 logits 并进行采样
+                    total_stats["draft_forward_count"] += 1
                     logits = draft_step_outputs.logits[:, -1, :]
-                    # 使用 do_sample=True, temperature=0.9 的逻辑
-                    logits = logits / 0.9
+                    logits = logits / 0.9  # temperature
                     probs = F.softmax(logits, dim=-1)
                     sampled_token = torch.multinomial(probs, num_samples=1)
-
                     draft_tokens.append(sampled_token.squeeze(0))
                     draft_logits_list.append(draft_step_outputs.logits)
 
-                    # 更新下一步的输入和KV缓存
                     next_token = sampled_token
                     current_draft_kv = draft_step_outputs.past_key_values
+
                 if not draft_tokens:
                     break
-
                 draft_tokens = torch.cat(draft_tokens)
                 draft_logits = torch.cat(draft_logits_list, dim=1)
-                # --- 3. 验证阶段 (Verification) ---
+
                 n_draft = len(draft_tokens)
+                total_stats["total_drafted_tokens"] += n_draft
+                # --- 3. 验证阶段 (Verification) ---
                 target_outputs = self.target_model(
                     input_ids=draft_tokens.unsqueeze(0),
                     use_cache=True,
                     past_key_values=past_key_values_target,
                 )
+                total_stats["target_forward_count"] += 1
                 target_logits = target_outputs.logits
+
                 # --- 4. 接受/拒绝逻辑 ---
                 accepted_count = 0
                 for i in range(n_draft):
                     p_target = F.softmax(target_logits[:, i, :], dim=-1).squeeze()
                     p_draft = F.softmax(draft_logits[:, i, :], dim=-1).squeeze()
                     draft_token_id = draft_tokens[i]
-
-                    if p_draft[draft_token_id] > 0 and torch.rand(1).item() < (
+                    if p_draft[draft_token_id] > 1e-9 and torch.rand(1).item() < (
                         p_target[draft_token_id] / p_draft[draft_token_id]
                     ):
                         accepted_count += 1
@@ -332,55 +344,59 @@ class BenchmarkModel:
                     last_pos_dist = F.softmax(target_logits[:, -1, :], dim=-1).squeeze()
                     bonus_token = torch.multinomial(last_pos_dist, 1)
                     final_new_tokens = torch.cat([draft_tokens, bonus_token], dim=0)
+                total_stats["total_accepted_tokens"] += accepted_count
                 # --- 5. 更新状态 ---
-                # 使用最终确认的 token 统一更新两个模型的KV缓存
                 final_tokens_for_update = final_new_tokens.unsqueeze(0)
+
                 target_update_outputs = self.target_model(
                     input_ids=final_tokens_for_update, use_cache=True, past_key_values=past_key_values_target
                 )
+                total_stats["target_forward_count"] += 1
                 past_key_values_target = target_update_outputs.past_key_values
-
                 draft_update_outputs = self.draft_model(
                     input_ids=final_tokens_for_update, use_cache=True, past_key_values=past_key_values_draft
                 )
+                total_stats["draft_forward_count"] += 1
                 past_key_values_draft = draft_update_outputs.past_key_values
-                # 更新主序列和注意力掩码
+
                 n_new = len(final_new_tokens)
                 generated_sequence = torch.cat([generated_sequence, final_new_tokens.unsqueeze(0)], dim=1)
                 attention_mask = torch.cat([attention_mask, torch.ones(1, n_new, device=self.device)], dim=1)
-
-                total_accepted_tokens += accepted_count
                 n_generated_for_prompt += n_new
                 if self.tokenizer.eos_token_id in final_new_tokens:
                     break
 
-            # ... 后续代码不变 ...
             total_generated_tokens += n_generated_for_prompt
             new_tokens_count = generated_sequence.shape[1] - prompt_len
             generated_text = self.tokenizer.decode(generated_sequence[0, prompt_len:], skip_special_tokens=True)
             model_answers.append(
                 {"prompt": prompt, "generated_text": generated_text, "new_tokens_count": new_tokens_count}
             )
-
         end_event.record(stream=torch.cuda.current_stream())
         torch.cuda.synchronize()
         wall_time = start_event.elapsed_time(end_event) / 1000.0
-
-        draft_attempts = (
-            total_generated_tokens - (len(prompts) - model_answers.count(None)) if prompts else 0
-        )  # Simplified
-        acceptance_rate = total_accepted_tokens / draft_attempts if draft_attempts > 0 else 0.0
-        decode_throughput = total_generated_tokens / wall_time if wall_time > 0 else 0.0
-        res = BenchmarkResults(
-            num_prompts=len(prompts),
-            total_generated_tokens=total_generated_tokens,
-            draft_model_generated_tokens=draft_attempts,
-            little_model_generated_tokens=0,
-            wall_time=wall_time,
-            decode_throughput_tokens_per_sec=decode_throughput,
-            acceptance_rate=acceptance_rate,
-            little_model_acceptance_rate=1.0,
+        # [MODIFIED] 构建完全符合您要求的 BenchmarkResults 字典
+        acceptance_rate = (
+            total_stats["total_accepted_tokens"] / total_stats["total_drafted_tokens"]
+            if total_stats["total_drafted_tokens"] > 0
+            else 0.0
         )
+        decode_throughput = total_generated_tokens / wall_time if wall_time > 0 else 0.0
+
+        res: BenchmarkResults = {
+            "num_prompts": len(prompts),
+            "total_generated_tokens": total_generated_tokens,
+            "draft_model_generated_tokens": total_stats["total_drafted_tokens"],
+            "little_model_generated_tokens": 0,  # 此实现中无 little model
+            "wall_time": wall_time,
+            "decode_throughput_tokens_per_sec": decode_throughput,
+            "acceptance_rate": acceptance_rate,
+            "little_model_acceptance_rate": 0.0,  # 无 little model，接受率为 0
+            "total_target_model_forward_time": total_stats["target_forward_count"],
+            "total_draft_model_forward_time": total_stats["draft_forward_count"],
+            "total_little_model_forward_time": 0,  # 无 little model，调用次数为 0
+        }
+
         return res, model_answers
 
     @torch.inference_mode()
@@ -401,6 +417,8 @@ class BenchmarkModel:
             raise ValueError("`prompt_ids` a single prompt, shape [1, seq_len].")
         if max_new_tokens <= 0:
             return prompt_ids
+        if self.draft_model is None:
+            raise ValueError("Draft model is not set. Please add a draft model before using speculative decoding.")
         input_ids = prompt_ids.to(self.device)
         prompt_len = input_ids.shape[1]
         attention_mask = torch.ones_like(input_ids)
@@ -528,6 +546,8 @@ class BenchmarkModel:
 
         # 为所有三个模型预先计算 prompt 的 KV 缓存
         past_kv_target = self.target_model(input_ids, use_cache=True).past_key_values
+        if self.draft_model is None:
+            raise ValueError("Draft model is not set. Please add a draft model before using tridecoding.")
         past_kv_draft = self.draft_model(input_ids, use_cache=True).past_key_values
         past_kv_little = self.little_model(input_ids, use_cache=True).past_key_values
         generated_sequence = input_ids
@@ -538,6 +558,9 @@ class BenchmarkModel:
             "drafted_for_target": 0,
             "accepted_by_draft": 0,
             "drafted_for_draft": 0,
+            "target_model_forward_time": 0,
+            "draft_model_forward_time": 0,
+            "little_model_forward_time": 0,
         }
         while num_generated < max_new_tokens:
             # --- 1. 小小模型起草 (Little Model Drafting) ---
@@ -547,6 +570,7 @@ class BenchmarkModel:
             next_token = generated_sequence[:, -1:]
             for _ in range(gamma1):
                 outputs = self.little_model(input_ids=next_token, use_cache=True, past_key_values=current_kv_little)
+                stats["little_model_forward_time"] += 1  # 每次调用 little_model 都计数
                 logits = outputs.logits[:, -1, :]
                 sampled_token = torch.multinomial(F.softmax(logits, dim=-1), 1)
 
@@ -565,6 +589,7 @@ class BenchmarkModel:
                 little_draft_tokens.unsqueeze(0), use_cache=True, past_key_values=past_kv_draft
             )
             draft_logits_for_little = draft_outputs_for_little.logits
+            stats["draft_model_forward_time"] += 1  # 每次调用 draft_model 都计数
             # 验证 little_model 的草稿
             verified_little_tokens = None
             stats["drafted_for_draft"] += len(little_draft_tokens)
@@ -572,6 +597,7 @@ class BenchmarkModel:
                 p_draft = F.softmax(draft_logits_for_little[:, i, :], -1).squeeze()
                 p_little = F.softmax(little_logits[:, i, :], -1).squeeze()
                 token_id = little_draft_tokens[i]
+                stats["draft_model_forward_time"] += 1  # 每次调用 draft_model 都计数
                 if torch.rand(1).item() < (p_draft[token_id] / (p_little[token_id] + 1e-9)):
                     stats["accepted_by_draft"] += 1
                     continue
@@ -598,6 +624,7 @@ class BenchmarkModel:
                 )
                 logits = outputs.logits[:, -1, :]
                 sampled_token = torch.multinomial(F.softmax(logits, dim=-1), 1)
+                stats["draft_model_forward_time"] += 1  # 每次调用 draft_model 都计数
 
                 draft_model_tokens.append(sampled_token.squeeze(0))
                 draft_logits_list_redraft.append(outputs.logits)
@@ -617,6 +644,7 @@ class BenchmarkModel:
 
             final_new_tokens = None
             n_draft = len(full_draft_tokens)
+            stats["target_model_forward_time"] += 1  # 每次调用 target_model 都计数
             stats["drafted_for_target"] += n_draft
             for i in range(n_draft):
                 p_target = F.softmax(target_logits[:, i, :], -1).squeeze()
@@ -647,6 +675,10 @@ class BenchmarkModel:
                 final_tokens_for_update, use_cache=True, past_key_values=past_kv_little
             ).past_key_values
             generated_sequence = torch.cat([generated_sequence, final_tokens_for_update], 1)
+            stats["little_model_forward_time"] += 1
+            stats["draft_model_forward_time"] += 1
+            stats["target_model_forward_time"] += 1
+
             num_generated += len(final_new_tokens)
             # 检查是否生成了 EOS token
             if self.tokenizer.eos_token_id in final_new_tokens:
@@ -681,6 +713,9 @@ class BenchmarkModel:
             "drafted_for_target": 0,
             "accepted_by_draft": 0,
             "drafted_for_draft": 0,
+            "target_model_forward_time": 0,
+            "draft_model_forward_time": 0,
+            "little_model_forward_time": 0,
         }
         generated_results = []
         # 逐个处理 prompt（因为我们的辅助函数是为单个 prompt 设计的）
@@ -729,6 +764,9 @@ class BenchmarkModel:
             "decode_throughput_tokens_per_sec": decode_throughput,
             "acceptance_rate": acceptance_rate,
             "little_model_acceptance_rate": little_model_acceptance_rate,
+            "total_target_model_forward_time": total_stats["target_model_forward_time"],
+            "total_draft_model_forward_time": total_stats["draft_model_forward_time"],
+            "total_little_model_forward_time": total_stats["little_model_forward_time"],
         }
         self.logger.info(f"Tridecoding finished. Wall time: {wall_time:.2f}s")
         self.logger.info(f"Benchmark Results: {benchmark_results}")

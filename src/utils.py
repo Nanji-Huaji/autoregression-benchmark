@@ -176,7 +176,7 @@ def parse_args():
     parser.add_argument(
         "--eval_mode",
         type=str,
-        default="tridecoding",
+        default="speculative_decoding",
         choices=["autoregressive_decoding", "speculative_decoding", "tridecoding"],
         help="Evaluation mode to use. Default is 'speculative_decoding'.",
     )
