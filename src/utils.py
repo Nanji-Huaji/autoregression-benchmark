@@ -7,6 +7,8 @@ import os
 
 from typing import List, Optional
 
+import argparse
+
 from transformers.modeling_utils import PreTrainedModel
 
 
@@ -125,3 +127,76 @@ def split_list_into_chunks(lst: List[str], m: int) -> List[List[str]]:
             chunks.append(lst[start:end])
         start = end
     return chunks
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run autoregressive decoding speed benchmark.")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="tiny-vicuna-1b",
+        help="The model to benchmark. Options: tiny-vicuna-1b, vicuna-13b-v1.5",
+    )
+    parser.add_argument(
+        "--max-token",
+        type=int,
+        default=128,
+        help="Maximum number of tokens to generate in each decoding step.",
+    )
+    parser.add_argument(
+        "--benchmark",
+        type=str,
+        default="data/mt_bench.jsonl",
+        help="The benchmark to run.",
+    )
+    parser.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=10,
+        help="Number of warmup steps before measuring speed.",
+    )
+    parser.add_argument(
+        "--draft_model",
+        type=str,
+        default="model/vicuna/vicuna-68m",
+        help="Path to the draft model for speculative decoding.",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=8,
+        help="Number of prompts to process in each batch.",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda:0",
+        help="Device to run the model on. Default is 'cuda:0'.",
+    )
+    parser.add_argument(
+        "--eval_mode",
+        type=str,
+        default="speculative_decoding",
+        choices=["autoregressive_decoding", "speculative_decoding", "tridecoding"],
+        help="Evaluation mode to use. Default is 'speculative_decoding'.",
+    )
+    parser.add_argument(
+        "--compile_optimization",
+        type=bool,
+        default=True,
+        help="Whether to use compile optimization for the model. Default is True.",
+    )
+    parser.add_argument(
+        "--little_model_path",
+        type=str,
+        required=False,
+        help="Path to the little model for speculative decoding.",
+    )
+    return parser.parse_args()
+
+
+model_dict = {
+    "tiny-vicuna-1b": "model/vicuna/tiny-vicuna-1b",
+    "vicuna-13b-v1.5": "model/vicuna/vicuna-13b-v1.5",
+    "vicuna-68m": "model/vicuna/vicuna-68m",
+}
