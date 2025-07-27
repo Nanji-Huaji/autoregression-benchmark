@@ -39,7 +39,7 @@ def run_benchmark(args):
     # warm up
     assert warmup_steps >= 0, "Warmup steps must be non-negative."
     warmup_prompts = prompts[:warmup_steps]
-    model_instance.warmup(warmup_prompts, max_token)
+    # model_instance.warmup(warmup_prompts, max_token)
 
     # run benchmark
     decoding_dict = {
@@ -54,19 +54,7 @@ def run_benchmark(args):
     result, model_answer = decode_function(prompts=prompts, max_token=max_token, gamma1=args.gamma1, gamma2=args.gamma2)
 
     # # Aggregate results
-    total_prompts = result["num_prompts"]
-    total_generated_tokens = result["total_generated_tokens"]
-    total_decode_time_sec = result["wall_time"]
-    decode_throughput = total_generated_tokens / total_decode_time_sec if total_decode_time_sec > 0 else 0.0
-    acceptance_rate = result["acceptance_rate"]
-    results = {
-        "model": model,
-        "num_prompts": total_prompts,
-        "total_generated_tokens": total_generated_tokens,
-        "total_decode_time_sec": total_decode_time_sec,
-        "decode_throughput_tokens_per_sec": decode_throughput,
-        "acceptance_rate": acceptance_rate,
-    }
+    results = result
     print(f"Benchmark results: {results}")
     logger.info(f"Benchmark results: {results}")
     argument = {

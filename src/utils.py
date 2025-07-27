@@ -176,21 +176,40 @@ def parse_args():
     parser.add_argument(
         "--eval_mode",
         type=str,
-        default="speculative_decoding",
+        default="tridecoding",
         choices=["autoregressive_decoding", "speculative_decoding", "tridecoding"],
         help="Evaluation mode to use. Default is 'speculative_decoding'.",
     )
     parser.add_argument(
         "--compile_optimization",
         type=bool,
-        default=True,
+        default=False,
         help="Whether to use compile optimization for the model. Default is True.",
     )
     parser.add_argument(
         "--little_model_path",
+        default="model/vicuna/vicuna-68m",
         type=str,
         required=False,
         help="Path to the little model for speculative decoding.",
+    )
+    parser.add_argument(
+        "--gamma",
+        type=int,
+        default=4,
+        help="Gamma value for speculative decoding. Default is 4.",
+    )
+    parser.add_argument(
+        "--gamma1",
+        type=int,
+        default=4,
+        help="Gamma1 value for tridecoding. Default is 4.",
+    )
+    parser.add_argument(
+        "--gamma2",
+        type=int,
+        default=4,
+        help="Gamma2 value for tridecoding. Default is 4.",
     )
     return parser.parse_args()
 
