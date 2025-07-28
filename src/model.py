@@ -70,6 +70,7 @@ class BenchmarkModel:
         self.draft_model = None
         self.tokenizer = self._load_tokenizer()
         self.args = args
+        self.device = self.target_model.device
         draft_model = model_dict.get(args.draft_model, args.draft_model)
         little_model = model_dict.get(args.little_model, args.little_model)
         if self.args.eval_mode == "speculative_decoding":
@@ -546,7 +547,7 @@ class BenchmarkModel:
         返回生成的 token IDs 和用于基准测试的统计数据。
         """
         # --- 0. 初始化 ---
-        input_ids = prompt_ids.to(self.device)
+        input_ids = prompt_ids.to(self.target_model.device)
 
         # 为所有三个模型预先计算 prompt 的 KV 缓存
         past_kv_target = self.target_model(input_ids, use_cache=True).past_key_values

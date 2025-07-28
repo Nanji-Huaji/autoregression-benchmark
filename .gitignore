@@ -222,3 +222,5 @@ tridecoding/*
 
 nohup.out
 experiment_log.txt
+speculative_decoding/results/benchmark_results_model/vicuna/vicuna-13b-v1.5_20250728_153116.json
+speculative_decoding/results/benchmark_results_model/vicuna/vicuna-13b-v1.5_20250728_153910.json
