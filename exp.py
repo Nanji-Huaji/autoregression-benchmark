@@ -23,22 +23,22 @@ model_dict = {
 # --- 2a. Tridecoding 实验配置 ---
 # (原 experiment_configs，已重命名以示区分)
 tridecoding_configs = [
-    {
-        "little": "vicuna-68m", "draft": "tiny-vicuna-1b", "target": "vicuna-7b-v1.5",
-        "gamma1_list": [8, 10, 12], "gamma2_list": [4, 5, 6, 7],
-    },
-    {
-        "little": "vicuna-68m", "draft": "tiny-vicuna-1b", "target": "vicuna-13b-v1.5",
-        "gamma1_list": [8, 10], "gamma2_list": [3, 4, 5],
-    },
-    {
-        "little": "vicuna-160m", "draft": "tiny-vicuna-1b", "target": "vicuna-7b-v1.5",
-        "gamma1_list": [10, 12, 14], "gamma2_list": [5, 6, 8],
-    },
-    {
-        "little": "vicuna-160m", "draft": "tiny-vicuna-1b", "target": "vicuna-13b-v1.5",
-        "gamma1_list": [10, 12], "gamma2_list": [4, 5, 6],
-    },
+    # {
+    #     "little": "vicuna-68m", "draft": "tiny-vicuna-1b", "target": "vicuna-7b-v1.5",
+    #     "gamma1_list": [8], "gamma2_list": [4],
+    # },
+    # {
+    #     "little": "vicuna-68m", "draft": "tiny-vicuna-1b", "target": "vicuna-13b-v1.5",
+    #     "gamma1_list": [8, 10], "gamma2_list": [3, 4, 5],
+    # },
+    # {
+    #     "little": "vicuna-160m", "draft": "tiny-vicuna-1b", "target": "vicuna-7b-v1.5",
+    #     "gamma1_list": [10, 12, 14], "gamma2_list": [5, 6, 8],
+    # },
+    # {
+    #     "little": "vicuna-160m", "draft": "tiny-vicuna-1b", "target": "vicuna-13b-v1.5",
+    #     "gamma1_list": [10, 12], "gamma2_list": [4, 5, 6],
+    # },
 ]
 
 # --- 2b. Speculative Decoding 实验配置 (新增) ---
@@ -48,13 +48,17 @@ speculative_configs = [
     #     "draft": "tiny-vicuna-1b", "target": "vicuna-7b-v1.5",
     #     "gamma_list": [4, 6, 8, 10], # 您可以根据需要调整gamma值
     # },
-    {
-        "draft": "tiny-vicuna-1b", "target": "vicuna-13b-v1.5",
-        "gamma_list": [i for i in range(3, 21)],
-    },
+    # {
+    #     "draft": "tiny-vicuna-1b", "target": "vicuna-13b-v1.5",
+    #     "gamma_list": [i for i in range(3, 21)],
+    # },
     # {
     #     "draft": "vicuna-160m", "target": "vicuna-7b-v1.5",
     #     "gamma_list": [5, 7, 9],
+    # }
+    # {
+    #     "draft": "vicuna-68m", "target": "tiny-vicuna-1b",
+    #     "gamma_list": [3],  # 您可以根据需要调整gamma值
     # }
 ]
 
@@ -70,14 +74,14 @@ def _run_subprocess(cmd):
 def launch_tridecoding_benchmark(
     model_path, draft_model_path, little_model_path, gamma1, gamma2,
     max_token=128, benchmark="data/mt_bench.jsonl", warmup_steps=10,
-    batch_size=8, device="auto"
+    batch_size=8, device="cuda:1"
 ):
     """为 Tridecoding 构建并执行命令。"""
     cmd = [
         "python", "src/benchmark.py",
         "--model", str(model_path),
         "--draft_model", str(draft_model_path),
-        "--little_model_path", str(little_model_path), # 确保参数名与 benchmark.py 匹配
+        "--little_model", str(little_model_path), # 确保参数名与 benchmark.py 匹配
         "--gamma1", str(gamma1),
         "--gamma2", str(gamma2),
         "--eval_mode", "tridecoding",
@@ -93,7 +97,7 @@ def launch_tridecoding_benchmark(
 def launch_speculative_benchmark(
     model_path, draft_model_path, gamma,
     max_token=128, benchmark="data/mt_bench.jsonl", warmup_steps=10,
-    batch_size=8, device="auto"
+    batch_size=8, device="cuda:1"
 ):
     """为 Speculative Decoding 构建并执行命令。"""
     cmd = [
@@ -128,40 +132,40 @@ def main():
     logging.info("=" * 60)
 
     # --- 4a. 执行 Tridecoding 实验 ---
-    # logging.info("\n" + "="*20 + " STARTING TRIDECODING EXPERIMENTS " + "="*20)
-    # for config in tridecoding_configs:
-    #     little_model_path = model_dict[config["little"]]
-    #     draft_model_path = model_dict[config["draft"]]
-    #     target_model_path = model_dict[config["target"]]
+    logging.info("\n" + "="*20 + " STARTING TRIDECODING EXPERIMENTS " + "="*20)
+    for config in tridecoding_configs:
+        little_model_path = model_dict[config["little"]]
+        draft_model_path = model_dict[config["draft"]]
+        target_model_path = model_dict[config["target"]]
 
-    #     for g1 in config["gamma1_list"]:
-    #         for g2 in config["gamma2_list"]:
-    #             if g2 > g1:
-    #                 logging.warning(f"Skipping combination where gamma2({g2}) > gamma1({g1}).")
-    #                 continue
+        for g1 in config["gamma1_list"]:
+            for g2 in config["gamma2_list"]:
+                if g2 > g1:
+                    logging.warning(f"Skipping combination where gamma2({g2}) > gamma1({g1}).")
+                    continue
 
-    #             completed_runs += 1
-    #             logging.info(f"--- [ RUN {completed_runs}/{total_runs} | Mode: Tridecoding ] ---")
-    #             logging.info(f"Models: L={config['little']}, D={config['draft']}, T={config['target']}")
-    #             logging.info(f"Gammas: gamma1={g1}, gamma2={g2}")
+                completed_runs += 1
+                logging.info(f"--- [ RUN {completed_runs}/{total_runs} | Mode: Tridecoding ] ---")
+                logging.info(f"Models: L={config['little']}, D={config['draft']}, T={config['target']}")
+                logging.info(f"Gammas: gamma1={g1}, gamma2={g2}")
                 
-    #             result = launch_tridecoding_benchmark(
-    #                 model_path=target_model_path, draft_model_path=draft_model_path,
-    #                 little_model_path=little_model_path, gamma1=g1, gamma2=g2
-    #             )
+                result = launch_tridecoding_benchmark(
+                    model_path=target_model_path, draft_model_path=draft_model_path,
+                    little_model_path=little_model_path, gamma1=g1, gamma2=g2
+                )
                 
-    #             # 统一的结果处理
-    #             if result.returncode == 0:
-    #                 logging.info(f"Run {completed_runs} completed SUCCESSFULLY.")
-    #                 logging.info("STDOUT (last 500 chars):\n" + result.stdout[-500:])
-    #             else:
-    #                 if "CUDA out of memory" in result.stderr or "OutOfMemoryError" in result.stderr:
-    #                     logging.warning(f"Run {completed_runs} FAILED due to CUDA Out of Memory. Skipping.")
-    #                     oom_skips += 1
-    #                 else:
-    #                     logging.error(f"Run {completed_runs} FAILED with an unknown error.")
-    #                     logging.error("STDERR:\n" + result.stderr)
-    #             logging.info("-" * 40 + "\n")
+                # 统一的结果处理
+                if result.returncode == 0:
+                    logging.info(f"Run {completed_runs} completed SUCCESSFULLY.")
+                    logging.info("STDOUT (last 500 chars):\n" + result.stdout[-500:])
+                else:
+                    if "CUDA out of memory" in result.stderr or "OutOfMemoryError" in result.stderr:
+                        logging.warning(f"Run {completed_runs} FAILED due to CUDA Out of Memory. Skipping.")
+                        oom_skips += 1
+                    else:
+                        logging.error(f"Run {completed_runs} FAILED with an unknown error.")
+                        logging.error("STDERR:\n" + result.stderr)
+                logging.info("-" * 40 + "\n")
 
     # --- 4b. 执行 Speculative Decoding 实验 ---
     logging.info("\n" + "="*15 + " STARTING SPECULATIVE DECODING EXPERIMENTS " + "="*15)

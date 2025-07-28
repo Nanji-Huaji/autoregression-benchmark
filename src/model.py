@@ -247,11 +247,13 @@ class BenchmarkModel:
 
     @torch.inference_mode()
     def speculative_decoding(
-        self, prompts: List[str], max_token: int = 128, gamma: int = 4, **kwargs
+        self, prompts: List[str], max_token: int = 128, gamma: int = 4, do_sample: bool = False, **kwargs
     ) -> Tuple[BenchmarkResults, List[Dict]]:
         """
         思辨解码实现，并根据指定的 BenchmarkResults 结构统计信息。
         """
+        target_temp = kwargs.get("target_model_temperature", 0.9)
+        draft_temp = kwargs.get("draft_model_temperature", 0.9)
         if not hasattr(self, "draft_model") or self.draft_model is None:
             raise AttributeError("Draft model `self.draft_model` is required for speculative decoding.")
 
@@ -304,9 +306,12 @@ class BenchmarkModel:
                     )
                     total_stats["draft_forward_count"] += 1
                     logits = draft_step_outputs.logits[:, -1, :]
-                    logits = logits / 0.9  # temperature
-                    probs = F.softmax(logits, dim=-1)
-                    sampled_token = torch.multinomial(probs, num_samples=1)
+                    if do_sample:
+                        logits = logits / draft_temp  # temperature
+                        probs = F.softmax(logits, dim=-1)
+                        sampled_token = torch.multinomial(probs, num_samples=1)
+                    else:
+                        sampled_token = torch.argmax(logits, dim=-1, keepdim=True)
                     draft_tokens.append(sampled_token.squeeze(0))
                     draft_logits_list.append(draft_step_outputs.logits)
 
@@ -340,14 +345,20 @@ class BenchmarkModel:
                     ):
                         accepted_count += 1
                     else:
-                        diff_dist = F.relu(p_target - p_draft)
-                        sum_diff = diff_dist.sum()
-                        resampled_token = torch.multinomial(p_target if sum_diff < 1e-9 else diff_dist / sum_diff, 1)
+                        if do_sample:
+                            diff_dist = F.relu(p_target - p_draft)
+                            sum_diff = diff_dist.sum()
+                            resampled_token = torch.multinomial(p_target if sum_diff < 1e-9 else diff_dist / sum_diff, 1)
+                        else:
+                            resampled_token = torch.argmax(p_target, dim=-1, keepdim=True)
                         final_new_tokens = torch.cat([draft_tokens[:accepted_count], resampled_token], dim=0)
                         break
                 else:
-                    last_pos_dist = F.softmax(target_logits[:, -1, :], dim=-1).squeeze()
-                    bonus_token = torch.multinomial(last_pos_dist, 1)
+                    if do_sample:
+                        last_pos_dist = F.softmax(target_logits[:, -1, :], dim=-1).squeeze()
+                        bonus_token = torch.multinomial(last_pos_dist, 1)
+                    else:
+                        bonus_token = torch.argmax(target_logits[:, -1, :], dim=-1)
                     final_new_tokens = torch.cat([draft_tokens, bonus_token], dim=0)
                 total_stats["total_accepted_tokens"] += accepted_count
                 # --- 5. 更新状态 ---
@@ -534,6 +545,20 @@ class BenchmarkModel:
 
         return generated_sequence
 
+    def _select_token(self, probs: torch.Tensor, do_sample: bool = False) -> torch.Tensor:
+        """
+        从给定的概率分布中选择一个 token。
+        Args:
+            probs (torch.Tensor): 形状为 `[vocab_size]` 的概率分布。
+            do_sample (bool): 是否使用采样策略。
+        Returns:
+            torch.Tensor: 选中的 token ID。
+        """
+        if do_sample:
+            return torch.multinomial(probs, num_samples=1)
+        else:
+            return torch.argmax(probs, dim=-1).unsqueeze(0)
+
     @torch.inference_mode()
     def _tridecoding_single_prompt(
         self,
@@ -541,6 +566,7 @@ class BenchmarkModel:
         max_new_tokens: int,
         gamma1: int,
         gamma2: int,
+        do_sample: bool = False,
     ) -> Tuple[torch.Tensor, Dict[str, int]]:
         """
         为单个 prompt 执行三阶段推测解码的核心逻辑。
@@ -577,11 +603,12 @@ class BenchmarkModel:
                 outputs = self.little_model(input_ids=next_token, use_cache=True, past_key_values=current_kv_little)
                 stats["little_model_forward_time"] += 1  # 每次调用 little_model 都计数
                 logits = outputs.logits[:, -1, :]
-                sampled_token = torch.multinomial(F.softmax(logits, dim=-1), 1)
+                probs = F.softmax(logits, dim=-1).squeeze(0)
+                sampled_token_1d = self._select_token(probs, do_sample)
 
-                little_draft_tokens.append(sampled_token.squeeze(0))
+                little_draft_tokens.append(sampled_token_1d)
                 little_logits_list.append(outputs.logits)
-                next_token = sampled_token
+                next_token = sampled_token_1d.unsqueeze(0)
                 current_kv_little = outputs.past_key_values
 
             if not little_draft_tokens:
@@ -603,15 +630,23 @@ class BenchmarkModel:
                 p_little = F.softmax(little_logits[:, i, :], -1).squeeze()
                 token_id = little_draft_tokens[i]
                 stats["draft_model_forward_time"] += 1  # 每次调用 draft_model 都计数
-                if torch.rand(1).item() < (p_draft[token_id] / (p_little[token_id] + 1e-9)):
-                    stats["accepted_by_draft"] += 1
-                    continue
-                else:  # 拒绝 & 重采样
-                    diff_dist = F.relu(p_draft - p_little)
-                    resampled_token = torch.multinomial(diff_dist / diff_dist.sum(), 1)
-                    verified_little_tokens = torch.cat([little_draft_tokens[:i], resampled_token], 0)
-                    break
-
+                if do_sample:
+                    if torch.rand(1).item() < (p_draft[token_id] / (p_little[token_id] + 1e-9)):
+                        stats["accepted_by_draft"] += 1
+                        continue
+                    else:  # 拒绝 & 重采样
+                        diff_dist = F.relu(p_draft - p_little)
+                        resampled_token = torch.multinomial(diff_dist / diff_dist.sum(), 1)
+                        verified_little_tokens = torch.cat([little_draft_tokens[:i], resampled_token], 0)
+                        break
+                else:  # 贪心策略
+                    if torch.argmax(p_draft) == token_id:
+                        stats["accepted_by_draft"] += 1
+                        continue
+                    else:
+                        resampled_token = torch.argmax(p_draft).unsqueeze(0)
+                        verified_little_tokens = torch.cat([little_draft_tokens[:i], resampled_token], dim=0)
+                        break
             if verified_little_tokens is None:  # 全部接受
                 verified_little_tokens = little_draft_tokens
             # 草稿模型在其验证后的序列基础上继续起草
@@ -628,12 +663,13 @@ class BenchmarkModel:
                     input_ids=next_token, use_cache=True, past_key_values=current_kv_draft_redraft
                 )
                 logits = outputs.logits[:, -1, :]
-                sampled_token = torch.multinomial(F.softmax(logits, dim=-1), 1)
+                probs = F.softmax(logits, dim=-1).squeeze(0)
+                sampled_token_1d = self._select_token(probs, do_sample)
                 stats["draft_model_forward_time"] += 1  # 每次调用 draft_model 都计数
 
-                draft_model_tokens.append(sampled_token.squeeze(0))
+                draft_model_tokens.append(sampled_token_1d)
                 draft_logits_list_redraft.append(outputs.logits)
-                next_token = sampled_token
+                next_token = sampled_token_1d.unsqueeze(0)
                 current_kv_draft_redraft = outputs.past_key_values
             # 组合成完整的草稿序列
             full_draft_tokens = verified_little_tokens
@@ -655,17 +691,30 @@ class BenchmarkModel:
                 p_target = F.softmax(target_logits[:, i, :], -1).squeeze()
                 p_draft = F.softmax(full_draft_logits[:, i, :], -1).squeeze()
                 token_id = full_draft_tokens[i]
-                if torch.rand(1).item() < (p_target[token_id] / (p_draft[token_id] + 1e-9)):
-                    stats["accepted_by_target"] += 1
-                    continue
-                else:  # 拒绝 & 重采样
-                    diff_dist = F.relu(p_target - p_draft)
-                    resampled_token = torch.multinomial(diff_dist / diff_dist.sum(), 1)
-                    final_new_tokens = torch.cat([full_draft_tokens[:i], resampled_token], 0)
-                    break
+                if do_sample:
+                    if torch.rand(1).item() < (p_target[token_id] / (p_draft[token_id] + 1e-9)):
+                        stats["accepted_by_target"] += 1
+                        continue
+                    else:  # 拒绝 & 重采样
+                        diff_dist = F.relu(p_target - p_draft)
+                        resampled_token = torch.multinomial(diff_dist / diff_dist.sum(), 1)
+                        final_new_tokens = torch.cat([full_draft_tokens[:i], resampled_token], 0)
+                        break
+                else:
+                    if torch.argmax(p_target) == token_id:
+                        stats["accepted_by_target"] += 1
+                        continue
+                    else:
+                        resampled_token = torch.argmax(p_target).unsqueeze(0)
+                        final_new_tokens = torch.cat([full_draft_tokens[:i], resampled_token], dim=0)
+                        break
             if final_new_tokens is None:  # 全部接受，生成一个 bonus token
-                bonus_token = torch.multinomial(F.softmax(target_logits[:, -1, :], -1).squeeze(), 1)
-                final_new_tokens = torch.cat([full_draft_tokens, bonus_token], 0)
+                # bonus_token = torch.multinomial(F.softmax(target_logits[:, -1, :], -1).squeeze(), 1)
+                # final_new_tokens = torch.cat([full_draft_tokens, bonus_token], 0)
+                last_pos_probs = F.softmax(target_logits[:, -1, :], -1).squeeze(0)
+                bonus_token = self._select_token(last_pos_probs, do_sample)
+                final_new_tokens = torch.cat([full_draft_tokens, bonus_token], dim=0)
+
             # --- 4. 更新所有模型状态 ---
             final_tokens_for_update = final_new_tokens.unsqueeze(0)
 

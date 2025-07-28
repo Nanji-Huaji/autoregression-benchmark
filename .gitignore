@@ -219,6 +219,7 @@ tridecoding/*
 
 # Logs
 *.log
+speculative_decoding/*
 
 nohup.out
 experiment_log.txt
