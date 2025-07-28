@@ -215,3 +215,10 @@ model/*
 # Results
 results/*
 .vscode/settings.json
+tridecoding/*
+
+# Logs
+*.log
+
+nohup.out
+experiment_log.txt

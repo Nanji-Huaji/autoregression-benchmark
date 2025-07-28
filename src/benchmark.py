@@ -24,7 +24,11 @@ from utils import model_dict
 
 def run_benchmark(args):
     model = args.model
-    model = model_dict[model]
+    draft_model = args.draft_model
+    little_model = args.little_model
+    model = model_dict.get(model, model)
+    draft_model = model_dict.get(draft_model, draft_model)
+    little_model = model_dict.get(little_model, little_model)
     max_token = args.max_token
     benchmark_file = args.benchmark
     warmup_steps = args.warmup_steps
@@ -71,7 +75,7 @@ def run_benchmark(args):
     }
     # Save results to a file
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_file = f"results/benchmark_results_{model}_{timestamp}.json"
+    output_file = f"{args.eval_mode}/results/benchmark_results_{model}_{timestamp}.json"
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     dump_data = {
         "arguments": argument,

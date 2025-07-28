@@ -158,7 +158,7 @@ def parse_args():
     parser.add_argument(
         "--draft_model",
         type=str,
-        default="model/vicuna/vicuna-68m",
+        default="vicuna-68m",
         help="Path to the draft model for speculative decoding.",
     )
     parser.add_argument(
@@ -187,8 +187,8 @@ def parse_args():
         help="Whether to use compile optimization for the model. Default is True.",
     )
     parser.add_argument(
-        "--little_model_path",
-        default="model/vicuna/vicuna-68m",
+        "--little_model",
+        default="vicuna-68m",
         type=str,
         required=False,
         help="Path to the little model for speculative decoding.",
@@ -215,7 +215,9 @@ def parse_args():
 
 
 model_dict = {
-    "tiny-vicuna-1b": "model/vicuna/tiny-vicuna-1b",
     "vicuna-13b-v1.5": "model/vicuna/vicuna-13b-v1.5",
+    "vicuna-7b-v1.5": "model/vicuna/vicuna-7b-v1.5",
+    "tiny-vicuna-1b": "model/vicuna/tiny-vicuna-1b",
+    "vicuna-160m": "model/vicuna/vicuna-160m",
     "vicuna-68m": "model/vicuna/vicuna-68m",
 }

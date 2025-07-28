@@ -23,6 +23,9 @@ import torch.nn.functional as F
 import time
 
 
+from utils import model_dict
+
+
 class BenchmarkResults(TypedDict):
     num_prompts: int
     total_generated_tokens: int
@@ -60,20 +63,21 @@ class BenchmarkModel:
         self.device = device
         self.torch_dtype = torch_dtype
         self.target_model = self._load_model()
-        if args.compile_optimization:
-            self.logger.info("Using compile optimization for target model.")
-            self.logger.info("compile optimization is enabled, which may improve performance.")
-            self.target_model = torch.compile(self.target_model, fullgraph=True, mode="reduce-overhead")  # type: ignore
+        # if args.compile_optimization:
+        #     self.logger.info("Using compile optimization for target model.")
+        #     self.logger.info("compile optimization is enabled, which may improve performance.")
+        #     self.target_model = torch.compile(self.target_model, fullgraph=True, mode="reduce-overhead")  # type: ignore
         self.draft_model = None
         self.tokenizer = self._load_tokenizer()
         self.args = args
-
+        draft_model = model_dict.get(args.draft_model, args.draft_model)
+        little_model = model_dict.get(args.little_model, args.little_model)
         if self.args.eval_mode == "speculative_decoding":
-            self.add_draft_model(self.args.draft_model)
+            self.add_draft_model(draft_model)
         if self.args.eval_mode == "tridecoding":
-            self.add_draft_model(self.args.draft_model)
+            self.add_draft_model(draft_model)
             self.little_model = AutoModelForCausalLM.from_pretrained(
-                self.args.little_model_path, torch_dtype=self.torch_dtype, device_map=self.device
+                little_model, torch_dtype=self.torch_dtype, device_map=self.device
             ).eval()
 
         self.logger.info(f"--- Initializing BenchmarkModel for: {self.model_id} ---")
@@ -83,10 +87,10 @@ class BenchmarkModel:
         self.draft_model = AutoModelForCausalLM.from_pretrained(
             draft_model_path, torch_dtype=self.torch_dtype, device_map=self.device
         ).eval()
-        if self.args.compile_optimization:
-            self.logger.info("Using compile optimization for draft model.")
-            self.logger.info("compile optimization is enabled, which may improve performance.")
-            self.draft_model = torch.compile(self.draft_model, fullgraph=True)
+        # if self.args.compile_optimization:
+        #     self.logger.info("Using compile optimization for draft model.")
+        #     self.logger.info("compile optimization is enabled, which may improve performance.")
+        #     self.draft_model = torch.compile(self.draft_model, fullgraph=True)
         self.logger.info(f"Draft model loaded from {draft_model_path}.")
         self.draft_model.config.use_static_cache = True
         self.draft_model.config.use_cache = True
